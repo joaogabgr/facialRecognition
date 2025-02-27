@@ -4,23 +4,35 @@ import threading
 import queue
 import numpy as np
 from ultralytics import YOLO
-import pyttsx3
+import time
+import pygame
+import os
 
-# Inicializa o motor de voz
-engine = pyttsx3.init()
-engine.setProperty('rate', 200)  # Velocidade da fala
-engine.setProperty('volume', 1.0)  # Volume (0.0 a 1.0)
+# Inicializa o pygame para tocar sons
+pygame.mixer.init()
 
-# Função para falar o alerta
-def falar_alerta(texto):
-    engine.say(texto)
-    engine.runAndWait()
+# Carrega o som de tiro
+som_tiro = pygame.mixer.Sound("sounds/ak47.wav")
+
+# Variável para controlar o tempo entre sons
+ultimo_som = 0
+TEMPO_ENTRE_SONS = 1  # segundos
+
+# Função para tocar o som de tiro
+def tocar_som_tiro():
+    global ultimo_som
+    tempo_atual = time.time()
+    
+    # Só emite som se passou tempo suficiente desde o último
+    if tempo_atual - ultimo_som >= TEMPO_ENTRE_SONS:
+        som_tiro.play()
+        ultimo_som = tempo_atual
 
 # Carrega o modelo YOLOv8
 model = YOLO('yolov8n.pt')
 
-# URL da câmera RTSP
-webCam = cv2.VideoCapture(0)
+url = "rtsp://admin:joao1234@192.168.1.106:554/onvif1"
+webCam = cv2.VideoCapture(url)
 
 # Configuração do buffer para reduzir latência
 webCam.set(cv2.CAP_PROP_BUFFERSIZE, 1)
@@ -119,9 +131,8 @@ while True:
                 pessoas_na_area += 1
                 cv2.rectangle(frame_display, (x1, y1), (x2, y2), (0, 255, 0), 2)
                 draw_text_with_background(frame_display, f"ALERTA! Pessoa {conf:.2f}", (x1, y1-10), color=(0, 255, 255))
-                # Inicia threads para som e voz
-                threading.Thread(target=winsound.Beep, args=(2000, 100), daemon=True).start()
-                threading.Thread(target=falar_alerta, args=("Atenção! Pessoa detectada na área de monitoramento!",), daemon=True).start()
+                # Inicia thread para som
+                threading.Thread(target=tocar_som_tiro, daemon=True).start()
             else:
                 cv2.rectangle(frame_display, (x1, y1), (x2, y2), (0, 165, 255), 2)
                 draw_text_with_background(frame_display, f"Pessoa {conf:.2f}", (x1, y1-10))
