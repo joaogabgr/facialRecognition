@@ -2,22 +2,57 @@ import cv2
 import winsound
 import threading
 import queue
+import numpy as np
+from ultralytics import YOLO
+import pyttsx3
+
+# Inicializa o motor de voz
+engine = pyttsx3.init()
+engine.setProperty('rate', 200)  # Velocidade da fala
+engine.setProperty('volume', 1.0)  # Volume (0.0 a 1.0)
+
+# Função para falar o alerta
+def falar_alerta(texto):
+    engine.say(texto)
+    engine.runAndWait()
+
+# Carrega o modelo YOLOv8
+model = YOLO('yolov8n.pt')
 
 # URL da câmera RTSP
-url = "rtsp://admin:joao1234@192.168.1.106:554/onvif1"
-webCam = cv2.VideoCapture(url)
+webCam = cv2.VideoCapture(0)
 
 # Configuração do buffer para reduzir latência
-webCam.set(cv2.CAP_PROP_BUFFERSIZE, 1)  # Minimiza o buffer de frames
+webCam.set(cv2.CAP_PROP_BUFFERSIZE, 1)
 
-# Carrega o classificador de faces
-classificador = cv2.CascadeClassifier('haarcascades/haarcascade_frontalface_default.xml')
+# Configurações da interface
+WINDOW_NAME = "Sistema Avançado de Detecção de Pessoas"
+cv2.namedWindow(WINDOW_NAME)
 
 # Coordenadas do retângulo delimitador
 rect_x, rect_y, rect_w, rect_h = 100, 100, 400, 300
 
 # Fila para frames (thread-safe)
 frame_queue = queue.Queue(maxsize=1)
+
+# Configurações de detecção
+CONFIDENCE_THRESHOLD = 0.5  # Limiar de confiança para detecção
+PERSON_CLASS_ID = 0  # ID da classe 'person' no COCO dataset
+
+# Função para adicionar texto com fundo
+def draw_text_with_background(img, text, pos, font_scale=0.7, color=(255, 255, 255)):
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    thickness = 1
+    text_size = cv2.getTextSize(text, font, font_scale, thickness)[0]
+    
+    # Adiciona fundo semi-transparente
+    overlay = img.copy()
+    cv2.rectangle(overlay, (pos[0], pos[1] - text_size[1] - 5),
+                 (pos[0] + text_size[0], pos[1] + 5), (0, 0, 0), -1)
+    cv2.addWeighted(overlay, 0.6, img, 0.4, 0, img)
+    
+    # Adiciona texto
+    cv2.putText(img, text, pos, font, font_scale, color, thickness)
 
 # Função para capturar frames em uma thread separada
 def capture_frames():
@@ -26,13 +61,12 @@ def capture_frames():
         if not ret:
             print("Erro ao capturar frame")
             break
-        # Adiciona o frame na fila, descartando o anterior se cheia
         if not frame_queue.full():
             frame_queue.put(frame)
         else:
             try:
-                frame_queue.get_nowait()  # Remove frame antigo
-                frame_queue.put(frame)    # Adiciona o novo
+                frame_queue.get_nowait()
+                frame_queue.put(frame)
             except queue.Empty:
                 pass
 
@@ -40,39 +74,79 @@ def capture_frames():
 capture_thread = threading.Thread(target=capture_frames, daemon=True)
 capture_thread.start()
 
+pessoas_detectadas = 0
+frame_count = 0
+fps = 0
+last_time = cv2.getTickCount()
+
 while True:
-    # Pega o frame mais recente da fila
     try:
-        frame = frame_queue.get(timeout=1)  # Timeout para não travar
+        frame = frame_queue.get(timeout=1)
     except queue.Empty:
         continue
 
-    # Reduz a resolução para aliviar o processamento
-    frame = cv2.resize(frame, (1280, 720 ))  # Ajuste conforme necessário
+    frame = cv2.resize(frame, (1280, 720))
+    frame_display = frame.copy()
 
-    # Converte para cinza apenas a ROI (Region of Interest)
-    roi_cinza = cv2.cvtColor(frame[rect_y:rect_y+rect_h, rect_x:rect_x+rect_w], cv2.COLOR_BGR2GRAY)
-    upperbodies = classificador.detectMultiScale(roi_cinza, scaleFactor=1.2, minNeighbors=4)
+    # Calcula FPS
+    current_time = cv2.getTickCount()
+    if frame_count % 30 == 0:  # Atualiza FPS a cada 30 frames
+        fps = 30 * cv2.getTickFrequency() / (current_time - last_time)
+        last_time = current_time
+    frame_count += 1
 
-    # Desenha o retângulo delimitador
-    cv2.rectangle(frame, (rect_x, rect_y), (rect_x + rect_w, rect_y + rect_h), (255, 0, 0), 2)
+    # Detecção usando YOLOv8
+    results = model(frame, verbose=False)[0]
+    pessoas_detectadas = 0
+    pessoas_na_area = 0
 
-    # Processa as detecções
-    for (x, y, l, a) in upperbodies:
-        # Ajusta as coordenadas para o frame original
-        x += rect_x
-        y += rect_y
-        cv2.rectangle(frame, (x, y), (x + l, y + a), (0, 0, 255), 2)
+    # Processa detecções
+    for result in results.boxes.data:
+        x1, y1, x2, y2, conf, class_id = result
+        if int(class_id) == PERSON_CLASS_ID and conf > CONFIDENCE_THRESHOLD:
+            x1, y1, x2, y2 = map(int, [x1, y1, x2, y2])
+            pessoas_detectadas += 1
+            
+            # Verifica se qualquer parte da pessoa está na área de monitoramento
+            pessoa_na_area = False
+            
+            # Verifica se há interseção entre o retângulo da pessoa e a área de monitoramento
+            if not (x2 < rect_x or  # Pessoa está totalmente à esquerda
+                   x1 > rect_x + rect_w or  # Pessoa está totalmente à direita
+                   y2 < rect_y or  # Pessoa está totalmente acima
+                   y1 > rect_y + rect_h):  # Pessoa está totalmente abaixo
+                pessoa_na_area = True
+                pessoas_na_area += 1
+                cv2.rectangle(frame_display, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                draw_text_with_background(frame_display, f"ALERTA! Pessoa {conf:.2f}", (x1, y1-10), color=(0, 255, 255))
+                # Inicia threads para som e voz
+                threading.Thread(target=winsound.Beep, args=(2000, 100), daemon=True).start()
+                threading.Thread(target=falar_alerta, args=("Atenção! Pessoa detectada na área de monitoramento!",), daemon=True).start()
+            else:
+                cv2.rectangle(frame_display, (x1, y1), (x2, y2), (0, 165, 255), 2)
+                draw_text_with_background(frame_display, f"Pessoa {conf:.2f}", (x1, y1-10))
 
-        # Verifica se a face está dentro do retângulo
-        if (rect_x < x < rect_x + rect_w and rect_y < y < rect_y + rect_h):
-            # Toca o som em uma thread separada para não bloquear
-            threading.Thread(target=winsound.Beep, args=(1000, 500), daemon=True).start()
+    # Desenha área de monitoramento
+    cv2.rectangle(frame_display, (rect_x, rect_y), (rect_x + rect_w, rect_y + rect_h), (0, 255, 0), 2)
+    
+    # Interface gráfica
+    # Título e informações
+    draw_text_with_background(frame_display, "Sistema Avançado de Detecção de Pessoas - YOLOv8", (10, 30))
+    draw_text_with_background(frame_display, f"Pessoas detectadas: {pessoas_detectadas}", (10, 60))
+    draw_text_with_background(frame_display, f"Pessoas na área: {pessoas_na_area}", (10, 90))
+    draw_text_with_background(frame_display, f"FPS: {fps:.1f}", (10, 120))
+    draw_text_with_background(frame_display, "Pressione 'Q' para sair", (10, 150))
+    
+    # Status do sistema
+    status = "MONITORANDO" if pessoas_detectadas > 0 else "AGUARDANDO"
+    status_color = (0, 255, 0) if status == "MONITORANDO" else (0, 0, 255)
+    draw_text_with_background(frame_display, f"Status: {status}", 
+                            (frame_display.shape[1] - 300, 30), 
+                            color=status_color)
 
     # Exibe o frame
-    cv2.imshow('Video', frame)
+    cv2.imshow(WINDOW_NAME, frame_display)
 
-    # Sai com 'q'
     if cv2.waitKey(1) & 0xFF == ord('q'):
         break
 
